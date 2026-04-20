@@ -8,7 +8,7 @@ namespace OpcUaClient.OpcUa
 {
     public sealed class OpcUaApplicationFactory
     {
-        private readonly OpcUaClientSettings _settings;
+        
 
     }
 }
