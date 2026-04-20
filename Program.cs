@@ -59,7 +59,7 @@ var config = new ApplicationConfiguration
     }
 };
 
-await config.Validate(ApplicationType.Client);
+await config.ValidateAsync(ApplicationType.Client);
 
 config.CertificateValidator.CertificateValidation += (_, e) =>
 {
@@ -70,22 +70,31 @@ config.CertificateValidator.CertificateValidation += (_, e) =>
     }
 };
 
-var application = new ApplicationInstance
+ApplicationInstance application = new ApplicationInstance
 {
     ApplicationName = config.ApplicationName,
     ApplicationType = ApplicationType.Client,
     ApplicationConfiguration = config
 };
 
-await application.CheckApplicationInstanceCertificates(false, 2048);
+await application.CheckApplicationInstanceCertificatesAsync(false, 2048);
 
 Console.WriteLine("Application configuration created.");
 
-var selectedEndpoint = CoreClientUtils.SelectEndpoint(
+// Use the async API instead of the obsolete synchronous SelectEndpoint.
+EndpointDescription? selectedEndpoint = await CoreClientUtils.SelectEndpointAsync(
     config,
     endpointUrl,
-    useSecurity: false
+    useSecurity: false,
+    CoreClientUtils.DefaultDiscoverTimeout,
+    telemetry: null!
 );
+
+if (selectedEndpoint == null)
+{
+    Console.WriteLine("No endpoint selected. Aborting.");
+    return;
+}
 
 Console.WriteLine("Endpoint selected:");
 Console.WriteLine($"  Url: {selectedEndpoint.EndpointUrl}");
@@ -95,7 +104,7 @@ Console.WriteLine($"  SecurityPolicy: {selectedEndpoint.SecurityPolicyUri}");
 var endpointConfiguration = EndpointConfiguration.Create(config);
 
 var endpoint = new ConfiguredEndpoint(
-    collection: null,
+    collection: null!,
     description: selectedEndpoint,
     configuration: endpointConfiguration
 );
@@ -108,7 +117,7 @@ var session = await Session.Create(
     sessionName: "Lucas-OpcUaClient-Session",
     sessionTimeout: 60000,
     identity: new UserIdentity(new AnonymousIdentityToken()),
-    preferredLocales: null
+    preferredLocales: null!
 );
 
 Console.WriteLine("Session created.");
