@@ -1,140 +1,146 @@
-﻿using System.Net;
+﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Opc.Ua;
 using Opc.Ua.Client;
-using Opc.Ua.Configuration;
+using OpcUaClient.Configuration;
+using OpcUaClient.Models;
+using OpcUaClient.OpcUa;
 
-const string endpointUrl = "opc.tcp://127.0.0.1:50000";
+IConfigurationRoot configuration = new ConfigurationBuilder()
+    .SetBasePath(AppContext.BaseDirectory)
+    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+    .Build();
 
-Console.WriteLine("Starting OPC UA connection smoke test...");
-Console.WriteLine($"Endpoint: {endpointUrl}");
+OpcUaClientSettings settings = configuration.Get<OpcUaClientSettings>()
+    ?? throw new InvalidOperationException("Could not load OPC UA settings from appsettings.json.");
 
-var config = new ApplicationConfiguration
+using ILoggerFactory loggerFactory = LoggerFactory.Create(builder =>
 {
-    ApplicationName = "OpcUaClient",
-    ApplicationUri = $"urn:{Dns.GetHostName()}:OpcUaClient",
-    ProductUri = "urn:qf:opcua-client",
-    ApplicationType = ApplicationType.Client,
+    builder
+        .AddConfiguration(configuration.GetSection("Logging"))
+        .AddConsole();
+});
 
-    SecurityConfiguration = new SecurityConfiguration
-    {
-        ApplicationCertificate = new CertificateIdentifier
-        {
-            StoreType = "Directory",
-            StorePath = "CertificateStores/OpcUaClient",
-            SubjectName = "CN=OpcUaClient"
-        },
+ILogger<Program> logger = loggerFactory.CreateLogger<Program>();
 
-        TrustedPeerCertificates = new CertificateTrustList
-        {
-            StoreType = "Directory",
-            StorePath = "CertificateStores/Trusted"
-        },
+var applicationFactory = new OpcUaApplicationFactory(
+    settings,
+    loggerFactory.CreateLogger<OpcUaApplicationFactory>());
 
-        TrustedIssuerCertificates = new CertificateTrustList
-        {
-            StoreType = "Directory",
-            StorePath = "CertificateStores/Issuers"
-        },
+var sessionService = new OpcUaSessionService(
+    settings,
+    loggerFactory.CreateLogger<OpcUaSessionService>());
 
-        RejectedCertificateStore = new CertificateTrustList
-        {
-            StoreType = "Directory",
-            StorePath = "CertificateStores/Rejected"
-        },
+var browseService = new OpcUaBrowseService(
+    loggerFactory.CreateLogger<OpcUaBrowseService>());
 
-        AutoAcceptUntrustedCertificates = true,
-        AddAppCertToTrustedStore = true
-    },
+var readService = new OpcUaReadService(
+    loggerFactory.CreateLogger<OpcUaReadService>());
 
-    TransportConfigurations = new TransportConfigurationCollection(),
+Session? session = null;
 
-    TransportQuotas = new TransportQuotas
-    {
-        OperationTimeout = 15000
-    },
-
-    ClientConfiguration = new ClientConfiguration
-    {
-        DefaultSessionTimeout = 60000
-    }
-};
-
-await config.ValidateAsync(ApplicationType.Client);
-
-config.CertificateValidator.CertificateValidation += (_, e) =>
+try
 {
-    if (e.Error.StatusCode == StatusCodes.BadCertificateUntrusted)
-    {
-        Console.WriteLine("Warning: accepting untrusted certificate for local development.");
-        e.Accept = true;
-    }
-};
+    logger.LogInformation("Starting OPC UA Client.");
+    logger.LogInformation("Configured endpoint: {EndpointUrl}", settings.EndpointUrl);
 
-ApplicationInstance application = new ApplicationInstance
+    ApplicationConfiguration applicationConfiguration =
+        await applicationFactory.CreateAsync();
+
+    session = await sessionService.ConnectAsync(applicationConfiguration);
+
+    PrintNamespaceTable(session);
+
+    IReadOnlyList<ReferenceDescription> references =
+        browseService.BrowseObjectsFolder(session);
+
+    PrintBrowseResult("Objects folder browse result", references);
+
+    NodeId truLaserRootNodeId = NodeId.Parse("ns=2;s=1");
+
+    IReadOnlyList<ReferenceDescription> truLaserRootReferences =
+        browseService.BrowseNode(
+            session,
+            truLaserRootNodeId,
+            "TruLaser Root");
+
+    PrintBrowseResult("TruLaser root browse result", truLaserRootReferences);
+
+    NodeId machineNodeId = NodeId.Parse("ns=2;s=30");
+
+    IReadOnlyList<ReferenceDescription> machineDetailsReferences =
+        browseService.BrowseNode(
+            session,
+            machineNodeId,
+            "Machine");
+
+    PrintBrowseResult("Machine browse result", machineDetailsReferences);
+
+    NodeId productionPlanNodeId = NodeId.Parse("ns=2;s=2");
+
+    IReadOnlyList<ReferenceDescription> productionPlanReferences =
+        browseService.BrowseNode(
+            session,
+            productionPlanNodeId,
+            "ProductionPlan");
+
+    PrintBrowseResult("ProductionPlan browse result", productionPlanReferences);
+
+    IReadOnlyList<OpcNodeValue> values =
+        readService.ReadServerStatus(session);
+
+    PrintReadResult(values);
+
+    logger.LogInformation("OPC UA Client finished successfully.");
+}
+catch (Exception exception)
 {
-    ApplicationName = config.ApplicationName,
-    ApplicationType = ApplicationType.Client,
-    ApplicationConfiguration = config
-};
-
-await application.CheckApplicationInstanceCertificatesAsync(false, 2048);
-
-Console.WriteLine("Application configuration created.");
-
-// Use the async API instead of the obsolete synchronous SelectEndpoint.
-EndpointDescription? selectedEndpoint = await CoreClientUtils.SelectEndpointAsync(
-    config,
-    endpointUrl,
-    useSecurity: false,
-    CoreClientUtils.DefaultDiscoverTimeout,
-    telemetry: null!
-);
-
-if (selectedEndpoint == null)
+    logger.LogError(exception, "OPC UA Client failed: {Message}", exception.Message);
+}
+finally
 {
-    Console.WriteLine("No endpoint selected. Aborting.");
-    return;
+    sessionService.Disconnect(session);
 }
 
-Console.WriteLine("Endpoint selected:");
-Console.WriteLine($"  Url: {selectedEndpoint.EndpointUrl}");
-Console.WriteLine($"  SecurityMode: {selectedEndpoint.SecurityMode}");
-Console.WriteLine($"  SecurityPolicy: {selectedEndpoint.SecurityPolicyUri}");
-
-var endpointConfiguration = EndpointConfiguration.Create(config);
-
-var endpoint = new ConfiguredEndpoint(
-    collection: null!,
-    description: selectedEndpoint,
-    configuration: endpointConfiguration
-);
-
-var session = await Session.Create(
-    configuration: config,
-    endpoint: endpoint,
-    updateBeforeConnect: false,
-    checkDomain: false,
-    sessionName: "Lucas-OpcUaClient-Session",
-    sessionTimeout: 60000,
-    identity: new UserIdentity(new AnonymousIdentityToken()),
-    preferredLocales: null!
-);
-
-Console.WriteLine("Session created.");
-Console.WriteLine($"Connected: {session.Connected}");
-Console.WriteLine($"Session name: {session.SessionName}");
-
-Console.WriteLine("Namespace table:");
-
-for (uint i = 0; i < session.NamespaceUris.Count; i++)
+static void PrintNamespaceTable(Session session)
 {
-    Console.WriteLine($"  {i}: {session.NamespaceUris.GetString(i)}");
+    Console.WriteLine();
+    Console.WriteLine("=== Namespace table ===");
+
+    for (uint index = 0; index < session.NamespaceUris.Count; index++)
+    {
+        Console.WriteLine($"{index}: {session.NamespaceUris.GetString(index)}");
+    }
 }
 
-Console.WriteLine("Closing session...");
+static void PrintBrowseResult(
+    string title,
+    IReadOnlyList<ReferenceDescription> references)
+{
+    Console.WriteLine();
+    Console.WriteLine($"=== {title} ===");
 
-session.Close();
-session.Dispose();
+    foreach (ReferenceDescription reference in references)
+    {
+        Console.WriteLine(
+            $"- {reference.DisplayName.Text} | NodeClass: {reference.NodeClass} | NodeId: {reference.NodeId}");
+    }
+}
 
-Console.WriteLine("Session closed.");
-Console.WriteLine("Smoke test finished.");
+static void PrintReadResult(IReadOnlyList<OpcNodeValue> values)
+{
+    Console.WriteLine();
+    Console.WriteLine("=== Server status values ===");
+
+    foreach (OpcNodeValue value in values)
+    {
+        Console.WriteLine($"Node: {value.DisplayName}");
+        Console.WriteLine($"  NodeId: {value.NodeId}");
+        Console.WriteLine($"  Value: {value.Value}");
+        Console.WriteLine($"  DataType: {value.DataType}");
+        Console.WriteLine($"  StatusCode: {value.StatusCode}");
+        Console.WriteLine($"  SourceTimestamp: {value.SourceTimestamp:O}");
+        Console.WriteLine($"  ServerTimestamp: {value.ServerTimestamp:O}");
+        Console.WriteLine();
+    }
+}
