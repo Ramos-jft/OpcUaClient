@@ -1,143 +1,146 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Opc.Ua;
 using Opc.Ua.Configuration;
 using OpcUaClient.Configuration;
 
-namespace OpcUaClient.OpcUa
+namespace OpcUaClient.OpcUa;
+
+internal sealed class OpcUaApplicationFactory
 {
-    public sealed class OpcUaApplicationFactory
+    private const string DirectoryStoreType = "Directory";
+
+    private readonly OpcUaClientSettings _settings;
+    private readonly ILogger<OpcUaApplicationFactory> _logger;
+
+    public OpcUaApplicationFactory(
+        OpcUaClientSettings settings,
+        ILogger<OpcUaApplicationFactory> logger)
     {
-        private readonly OpcUaClientSettings _settings;
-        private readonly ILogger<OpcUaApplicationFactory> _logger;
+        _settings = settings;
+        _logger = logger;
+    }
 
-        public OpcUaApplicationFactory(
-            OpcUaClientSettings settings,
-            ILogger<OpcUaApplicationFactory> logger)
+    public async Task<ApplicationConfiguration> CreateAsync()
+    {
+        ValidateSettings();
+
+        var configuration = new ApplicationConfiguration
         {
-            _settings = settings;
-            _logger = logger;
-        }
+            ApplicationName = _settings.ApplicationName,
+            ApplicationUri = _settings.ApplicationUri,
+            ProductUri = _settings.ProductUri,
+            ApplicationType = ApplicationType.Client,
+            SecurityConfiguration = CreateSecurityConfiguration(),
+            TransportConfigurations = new TransportConfigurationCollection(),
+            TransportQuotas = new TransportQuotas
+            {
+                OperationTimeout = _settings.Session.OperationTimeoutMs
+            },
+            ClientConfiguration = new ClientConfiguration
+            {
+                DefaultSessionTimeout = _settings.Session.SessionTimeoutMs
+            }
+        };
 
-        public async Task<ApplicationConfiguration> CreateAsync()
+        await configuration.ValidateAsync(ApplicationType.Client);
+        ConfigureCertificateValidation(configuration);
+
+        var application = new ApplicationInstance
         {
-            ValidateSettings();
+            ApplicationName = configuration.ApplicationName,
+            ApplicationType = ApplicationType.Client,
+            ApplicationConfiguration = configuration
+        };
 
-            var configuration = new ApplicationConfiguration
-            {
-                ApplicationName = _settings.ApplicationName,
-                ApplicationUri = _settings.ApplicationUri,
-                ProductUri = _settings.ProductUri,
-                ApplicationType = ApplicationType.Client,
-
-                SecurityConfiguration = new SecurityConfiguration
-                {
-                    ApplicationCertificate = new CertificateIdentifier
-                    {
-                        StoreType = "Directory",
-                        StorePath = _settings.Certificates.StorePath,
-                        SubjectName = $"CN={_settings.ApplicationName}"
-                    },
-
-                    TrustedPeerCertificates = new CertificateTrustList
-                    {
-                        StoreType = "Directory",
-                        StorePath = _settings.Certificates.TrustedStorePath
-                    },
-
-                    TrustedIssuerCertificates = new CertificateTrustList
-                    {
-                        StoreType = "Directory",
-                        StorePath = _settings.Certificates.TrustedStorePath
-                    },
-
-                    RejectedCertificateStore = new CertificateTrustList
-                    {
-                        StoreType = "Directory",
-                        StorePath = _settings.Certificates.RejectedStorePath
-                    },
-
-                    AutoAcceptUntrustedCertificates = _settings.Security.AutoAcceptUntrustedCertificates,
-                    AddAppCertToTrustedStore = true
-                },
-
-                TransportConfigurations = new TransportConfigurationCollection(),
-
-                TransportQuotas = new TransportQuotas
-                {
-                    OperationTimeout = _settings.Session.OperationTimeoutMs
-                },
-
-                ClientConfiguration = new ClientConfiguration
-                {
-                    DefaultSessionTimeout = _settings.Session.SessionTimeoutMs
-                }
-            };
-
-            await configuration.ValidateAsync(ApplicationType.Client);
-
-            configuration.CertificateValidator.CertificateValidation += (_, eventArgs) =>
-            {
-                if (eventArgs.Error.StatusCode == StatusCodes.BadCertificateUntrusted &&
-                    _settings.Security.AutoAcceptUntrustedCertificates)
-                {
-                    _logger.LogWarning(
-                        "Accepting untrusted certificate for local development.");
-
-                    eventArgs.Accept = true;
-                }
-            };
-
-            var application = new ApplicationInstance
-            {
-                ApplicationName = configuration.ApplicationName,
-                ApplicationType = ApplicationType.Client,
-                ApplicationConfiguration = configuration
-            };
-
+        bool certificateIsValid =
             await application.CheckApplicationInstanceCertificatesAsync(false, 2048);
 
-            _logger.LogInformation("OPC UA application configuration created and validated.");
-
-            return configuration;
+        if (!certificateIsValid)
+        {
+            throw new InvalidOperationException(
+                "The OPC UA application certificate is invalid or could not be created.");
         }
 
-        private void ValidateSettings()
+        _logger.LogInformation("OPC UA application configuration created and validated.");
+
+        return configuration;
+    }
+
+    private SecurityConfiguration CreateSecurityConfiguration()
+    {
+        return new SecurityConfiguration
         {
-            if (string.IsNullOrWhiteSpace(_settings.EndpointUrl))
+            ApplicationCertificate = new CertificateIdentifier
             {
-                throw new InvalidOperationException(
-                    "EndpointUrl is required in appsettings.json.");
+                StoreType = DirectoryStoreType,
+                StorePath = _settings.Certificates.StorePath,
+                SubjectName = $"CN={_settings.ApplicationName}"
+            },
+            TrustedPeerCertificates = new CertificateTrustList
+            {
+                StoreType = DirectoryStoreType,
+                StorePath = _settings.Certificates.TrustedStorePath
+            },
+            TrustedIssuerCertificates = new CertificateTrustList
+            {
+                StoreType = DirectoryStoreType,
+                StorePath = _settings.Certificates.TrustedStorePath
+            },
+            RejectedCertificateStore = new CertificateTrustList
+            {
+                StoreType = DirectoryStoreType,
+                StorePath = _settings.Certificates.RejectedStorePath
+            },
+            AutoAcceptUntrustedCertificates = _settings.Security.AutoAcceptUntrustedCertificates,
+            AddAppCertToTrustedStore = true
+        };
+    }
+
+    private void ConfigureCertificateValidation(ApplicationConfiguration configuration)
+    {
+        configuration.CertificateValidator.CertificateValidation += (_, eventArgs) =>
+        {
+            bool canAcceptCertificate =
+                eventArgs.Error.StatusCode == StatusCodes.BadCertificateUntrusted &&
+                _settings.Security.AutoAcceptUntrustedCertificates;
+
+            if (!canAcceptCertificate)
+            {
+                return;
             }
 
-            if (string.IsNullOrWhiteSpace(_settings.ApplicationName))
-            {
-                throw new InvalidOperationException(
-                    "ApplicationName is required in appsettings.json.");
-            }
+            _logger.LogWarning(
+                "Accepting untrusted certificate for local development.");
 
-            if (string.IsNullOrWhiteSpace(_settings.ApplicationUri))
-            {
-                throw new InvalidOperationException(
-                    "ApplicationUri is required in appsettings.json.");
-            }
+            eventArgs.Accept = true;
+        };
+    }
 
-            if (string.IsNullOrWhiteSpace(_settings.ProductUri))
-            {
-                throw new InvalidOperationException(
-                    "ProductUri is required in appsettings.json.");
-            }
+    private void ValidateSettings()
+    {
+        RequireText(_settings.EndpointUrl, nameof(_settings.EndpointUrl));
+        RequireText(_settings.ApplicationName, nameof(_settings.ApplicationName));
+        RequireText(_settings.ApplicationUri, nameof(_settings.ApplicationUri));
+        RequireText(_settings.ProductUri, nameof(_settings.ProductUri));
+        RequirePositive(_settings.Session.SessionTimeoutMs, nameof(_settings.Session.SessionTimeoutMs));
+        RequirePositive(_settings.Session.OperationTimeoutMs, nameof(_settings.Session.OperationTimeoutMs));
+    }
 
-            if (_settings.Session.SessionTimeoutMs <= 0)
-            {
-                throw new InvalidOperationException(
-                    "SessionTimeoutMs must be greater than zero.");
-            }
+    private static void RequireText(string value, string settingName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException(
+                $"{settingName} is required in appsettings.json.");
+        }
+    }
 
-            if (_settings.Session.OperationTimeoutMs <= 0)
-            {
-                throw new InvalidOperationException(
-                    "OperationTimeoutMs must be greater than zero.");
-            }
+    private static void RequirePositive(int value, string settingName)
+    {
+        if (value <= 0)
+        {
+            throw new InvalidOperationException(
+                $"{settingName} must be greater than zero.");
         }
     }
 }
