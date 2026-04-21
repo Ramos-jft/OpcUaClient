@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Opc.Ua;
 using Opc.Ua.Client;
@@ -12,7 +12,8 @@ IConfigurationRoot configuration = new ConfigurationBuilder()
     .Build();
 
 OpcUaClientSettings settings = configuration.Get<OpcUaClientSettings>()
-    ?? throw new InvalidOperationException("Could not load OPC UA settings from appsettings.json.");
+    ?? throw new InvalidOperationException(
+        "Could not load OPC UA settings from appsettings.json.");
 
 using ILoggerFactory loggerFactory = LoggerFactory.Create(builder =>
 {
@@ -51,45 +52,17 @@ try
 
     PrintNamespaceTable(session);
 
-    IReadOnlyList<ReferenceDescription> references =
+    IReadOnlyList<ReferenceDescription> objectReferences =
         browseService.BrowseObjectsFolder(session);
 
-    PrintBrowseResult("Objects folder browse result", references);
+    PrintBrowseResult("ObjectsFolder browse result", objectReferences);
 
-    NodeId truLaserRootNodeId = NodeId.Parse("ns=2;s=1");
+    BrowseConfiguredNodes(settings, browseService, session);
 
-    IReadOnlyList<ReferenceDescription> truLaserRootReferences =
-        browseService.BrowseNode(
-            session,
-            truLaserRootNodeId,
-            "TruLaser Root");
-
-    PrintBrowseResult("TruLaser root browse result", truLaserRootReferences);
-
-    NodeId machineNodeId = NodeId.Parse("ns=2;s=30");
-
-    IReadOnlyList<ReferenceDescription> machineDetailsReferences =
-        browseService.BrowseNode(
-            session,
-            machineNodeId,
-            "Machine");
-
-    PrintBrowseResult("Machine browse result", machineDetailsReferences);
-
-    NodeId productionPlanNodeId = NodeId.Parse("ns=2;s=2");
-
-    IReadOnlyList<ReferenceDescription> productionPlanReferences =
-        browseService.BrowseNode(
-            session,
-            productionPlanNodeId,
-            "ProductionPlan");
-
-    PrintBrowseResult("ProductionPlan browse result", productionPlanReferences);
-
-    IReadOnlyList<OpcNodeValue> values =
+    IReadOnlyList<OpcNodeValue> serverStatusValues =
         readService.ReadServerStatus(session);
 
-    PrintReadResult(values);
+    PrintReadResult("Server status values", serverStatusValues);
 
     logger.LogInformation("OPC UA Client finished successfully.");
 }
@@ -100,6 +73,27 @@ catch (Exception exception)
 finally
 {
     sessionService.Disconnect(session);
+}
+
+static void BrowseConfiguredNodes(
+    OpcUaClientSettings settings,
+    OpcUaBrowseService browseService,
+    Session session)
+{
+    foreach (OpcUaBrowseNodeSettings browseNode in settings.BrowseNodes)
+    {
+        if (string.IsNullOrWhiteSpace(browseNode.NodeId))
+        {
+            continue;
+        }
+
+        NodeId nodeId = NodeId.Parse(browseNode.NodeId);
+
+        IReadOnlyList<ReferenceDescription> references =
+            browseService.BrowseNode(session, nodeId, browseNode.Label);
+
+        PrintBrowseResult($"{browseNode.Label} browse result", references);
+    }
 }
 
 static void PrintNamespaceTable(Session session)
@@ -127,10 +121,12 @@ static void PrintBrowseResult(
     }
 }
 
-static void PrintReadResult(IReadOnlyList<OpcNodeValue> values)
+static void PrintReadResult(
+    string title,
+    IReadOnlyList<OpcNodeValue> values)
 {
     Console.WriteLine();
-    Console.WriteLine("=== Server status values ===");
+    Console.WriteLine($"=== {title} ===");
 
     foreach (OpcNodeValue value in values)
     {
